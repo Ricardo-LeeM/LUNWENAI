@@ -203,27 +203,67 @@ void AiChatDialog::on_btnSend_clicked()
     // ================= 核心：构建发给智谱大模型的 JSON =================
     QJsonObject json;
     json["model"] = "glm-4-flash"; // 使用免费且极速的模型
-    json["temperature"] = 0.1;     // 温度调低，让 AI 回答更严谨（适合写 SQL）
+    json["temperature"] = 0.1;     // 温度调低，让 AI 回答更严谨，减少幻觉
 
     QJsonArray messagesArray;
 
-    // 【权限隔离精髓】：通过系统提示词(System Prompt)控制 AI 的权限
+    // 获取当前登录员工的工号和姓名（用于不同表的权限控制）
+    int currentEmpId = UserSession::instance()->employeeID();
+    QString currentEmpName = UserSession::instance()->name();
+
+    // ================= 步骤 A：系统提示词 (注入完整的 10 张表 Schema) =================
+    QString baseSchema =
+        "你是一个精通MySQL的HR系统AI数据库助手。\n"
+        "【严禁捏造】你只能查询以下10张表，绝不能自己编造表名或字段名：\n"
+        "1. basicinfo (员工基本信息表): EmployeeID(工号), Name(姓名), Department(部门), Position(职位), EmployeeStatus(状态), JoinDate(入职日期), Pic(头像)\n"
+        "2. EmployeesSalary (员工基本薪资表): employee_id(工号), name(姓名), department(部门), base_salary(基本工资)\n"
+        "3. PayrollRecords (每月薪资表): employee_id(工号), payroll_period(发薪周期)\n"
+        "4. tasks (任务表): TaskID, TaskName, TaskType, AssignerID(分配人工号), AssigneeID(被分配人工号), Status, DueDate\n"
+        "5. users (用户表): EmployeeID(工号), username(用户名), password(密码)\n"
+        "6. personal_application (个人申报表): EmployeeID(工号), Name(姓名), FinancialNum(财务申报数), VacationNum(休假申报数), ProjectionNum(立项申报数)\n"
+        "7. job_requirements (招聘需求表): id, Department, Position, NeedNumber, requirement\n"
+        "8. interviewees (面试人员表): id, name, phone, applied_position, status, interview_time\n"
+        "9. declarations (公司申报表): id, applicant_name(申请人姓名), declaration_type, status, submission_timestamp\n"
+        "10. chat_messages (聊天记录表): msg_id, sender_id(发送者工号), receiver_id(接收者工号), content, send_time\n"
+        "请直接输出包含在 ```sql 和 ``` 之间的查询语句，不要任何多余的汉字解释。";
+
     QJsonObject systemMessage;
     systemMessage["role"] = "system";
+
     if (m_isAdmin) {
-        systemMessage["content"] = "你是一个HR系统的【超级管理员】AI助手。数据库包含 basicinfo, PayrollRecords, declarations 等表。"
-                                   "请根据要求给出准确的 MySQL 查询语句。必须用 ```sql 和 ``` 将代码包裹起来。不要有任何废话。";
+        // 管理员模式：可跨表查询所有人的数据
+        systemMessage["content"] = baseSchema + "\n当前为【超级管理员】模式，可自由关联查询所有人的数据。";
     } else {
-        // 获取当前真实登录的工号
-        int currentEmpId = UserSession::instance()->employeeID();
-        systemMessage["content"] = QString("你是一个HR系统的【普通员工】AI自助助手。当前登录员工的工号是 %1。"
-                                           "你【绝不可以】查询除了该员工以外的任何人。"
-                                           "请给出查询语句，WHERE 条件必须且只能包含 EmployeeID = %1。"
-                                           "必须用 ```sql 和 ``` 将代码包裹起来。不要有废话。").arg(currentEmpId);
+        // 员工模式：极其严苛的行级数据隔离 + 拒绝策略
+        systemMessage["content"] = baseSchema + QString(
+                                                    "\n当前为【普通员工】模式，登录工号: %1，姓名: '%2'。\n"
+                                                    "【权限死线】除了招聘需求表(job_requirements)外，绝不能查别人！\n"
+                                                    "【拒绝策略】如果用户明确要求查询“所有人”、“其他员工”名单或工资，请绝对不要生成SQL代码！直接回复：'抱歉，作为普通员工，您无权跨级查询其他人的信息。'\n"
+                                                    "条件对应关系：\n"
+                                                    "- basicinfo, users, personal_application 必须包含 EmployeeID = %1\n"
+                                                    "- EmployeesSalary, PayrollRecords 必须包含 employee_id = %1\n"
+                                                    "- tasks 必须包含 AssigneeID = %1\n"
+                                                    "- declarations 必须包含 applicant_name = '%2'\n"
+                                                    "- chat_messages 必须包含 (sender_id = %1 OR receiver_id = %1)"
+                                                    ).arg(currentEmpId).arg(currentEmpName);
     }
     messagesArray.append(systemMessage);
 
-    // 填入用户的提问
+    // ================= 步骤 B：提供标准答案范例 (Few-Shot 提示工程) =================
+    if (m_isAdmin) {
+        messagesArray.append(QJsonObject{{"role", "user"}, {"content", "查一下所有待处理的申报"}});
+        messagesArray.append(QJsonObject{{"role", "assistant"}, {"content", "```sql\nSELECT * FROM declarations WHERE status = '待审批';\n```"}});
+    } else {
+        // 演示查工号逻辑
+        messagesArray.append(QJsonObject{{"role", "user"}, {"content", "我的基本工资是多少"}});
+        messagesArray.append(QJsonObject{{"role", "assistant"}, {"content", QString("```sql\nSELECT base_salary FROM EmployeesSalary WHERE employee_id = %1;\n```").arg(currentEmpId)}});
+
+        // 演示查姓名逻辑
+        messagesArray.append(QJsonObject{{"role", "user"}, {"content", "我提交过哪些申报"}});
+        messagesArray.append(QJsonObject{{"role", "assistant"}, {"content", QString("```sql\nSELECT declaration_type, status, submission_timestamp FROM declarations WHERE applicant_name = '%1';\n```").arg(currentEmpName)}});
+    }
+
+    // ================= 步骤 C：填入用户本次真正的提问 =================
     QJsonObject userMessage;
     userMessage["role"] = "user";
     userMessage["content"] = content;
@@ -242,7 +282,7 @@ void AiChatDialog::on_btnSend_clicked()
     QString authHeader = "Bearer " + m_apiKey;
     request.setRawHeader("Authorization", authHeader.toUtf8());
 
-    // 发起异步请求，完成后会自动触发 onReplyFinished 槽函数
+    // 发起异步请求
     m_networkManager->post(request, postData);
 }
 
@@ -304,6 +344,27 @@ void AiChatDialog::executeSqlAndShowResult(const QString &sql)
         return;
     }
 
+    // ==========================================================
+    // 【新增修改】 2. 数据越权物理拦截（员工端特供防线）
+    // ==========================================================
+    if (!m_isAdmin) {
+        int empId = UserSession::instance()->employeeID();
+        QString empName = UserSession::instance()->name();
+
+        // 判断是否在查询公开表（招聘需求表谁都可以看全表）
+        bool isPublicTable = upperSql.contains("JOB_REQUIREMENTS");
+
+        if (!isPublicTable) {
+            // 如果生成的 SQL 语句中既没有出现当前员工的工号，也没有出现姓名
+            // 说明 AI 违背了指令，正在尝试查询所有人的数据，直接物理掐断！
+            if (!sql.contains(QString::number(empId)) && !sql.contains(empName)) {
+                ui->textBrowserChat->append("<div style='color:red; margin:5px;'>⛔ <b>底层数据拦截：</b> 检测到越权查询请求。您只能查询与本人（工号: " + QString::number(empId) + "）相关的数据记录！</div>");
+                return;
+            }
+        }
+    }
+
+
     // 2. 执行查询
     QSqlQuery query;
     if (!query.exec(sql)) {
@@ -312,7 +373,6 @@ void AiChatDialog::executeSqlAndShowResult(const QString &sql)
     }
 
     // 3. 开始构建 HTML 表格
-    // 定义表格样式：边框折叠、宽度100%、单元格内边距等
     QString html = "<table border='1' cellspacing='0' cellpadding='5' style='border-collapse: collapse; width: 100%; border-color: #D1D5DB; font-size: 13px; margin-top: 10px;'>";
 
     // 获取字段信息（表头）
@@ -323,7 +383,7 @@ void AiChatDialog::executeSqlAndShowResult(const QString &sql)
         return;
     }
 
-    // 拼装表头 (使用你的薄荷绿主题色)
+    // 拼装表头
     html += "<tr style='background-color: #D1FAE5; color: #064E3B;'>";
     for (int i = 0; i < colCount; ++i) {
         html += "<th>" + record.fieldName(i) + "</th>";
@@ -333,11 +393,24 @@ void AiChatDialog::executeSqlAndShowResult(const QString &sql)
     // 拼装数据行
     int rowCount = 0;
     while (query.next()) {
-        // 斑马线效果：偶数行纯白，奇数行极浅的灰色
         QString bgColor = (rowCount % 2 == 0) ? "#FFFFFF" : "#F9FAFB";
-        html += "<tr style='background-color: " + bgColor + ";'>";
+        html += "<tr style='background-color: " + bgColor + "; text-align: center;'>";
         for (int i = 0; i < colCount; ++i) {
-            html += "<td>" + query.value(i).toString() + "</td>";
+            QString fieldName = record.fieldName(i);
+
+            // 【修改核心】：识别图片字段，转为 Base64 网页渲染，防止乱码
+            if (fieldName.compare("Pic", Qt::CaseInsensitive) == 0) {
+                QByteArray imgBytes = query.value(i).toByteArray();
+                if (imgBytes.isEmpty()) {
+                    html += "<td style='color: #9CA3AF;'>[无图片]</td>";
+                } else {
+                    QString base64Img = QString::fromLatin1(imgBytes.toBase64());
+                    html += "<td><img src='data:image/png;base64," + base64Img + "' width='40' height='40' style='border-radius: 4px; vertical-align: middle;'/></td>";
+                }
+            } else {
+                // 普通文本字段直接输出
+                html += "<td>" + query.value(i).toString() + "</td>";
+            }
         }
         html += "</tr>";
         rowCount++;
