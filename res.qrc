@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/new"/>
+    <qresource prefix="/">
+        <file>C:/images/xiyang.png</file>
+        <file>C:/images/lunwenAI.png</file>
+    </qresource>
+</RCC>
