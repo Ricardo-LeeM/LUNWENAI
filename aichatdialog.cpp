@@ -265,11 +265,15 @@ void AiChatDialog::onReplyFinished(QNetworkReply *reply)
                 QJsonObject messageObj = firstChoice["message"].toObject();
                 QString aiReply = messageObj["content"].toString();
 
-                // 打印在界面上
-                ui->textBrowserChat->append("<div style='margin:5px;'><span style='background-color:#FFFFFF; border:1px solid #D1D5DB; padding:8px; border-radius:6px; color:black;'>🤖 <b>助手：</b><br>" + aiReply.replace("\n", "<br>") + "</span></div>");
+                // 【修改核心】：复制一份专门用于 UI 显示，避免污染原数据
+                QString displayReply = aiReply;
+                displayReply.replace("\n", "<br>");
+
+                // 打印在界面上（使用带有 <br> 的副本 displayReply）
+                ui->textBrowserChat->append("<div style='margin:5px;'><span style='background-color:#FFFFFF; border:1px solid #D1D5DB; padding:8px; border-radius:6px; color:black;'>🤖 <b>助手：</b><br>" + displayReply + "</span></div>");
 
                 // ================= 提取并执行 SQL =================
-                // 使用正则表达式匹配 ```sql 和 ``` 之间的内容
+                // 【修改核心】：使用原汁原味的 aiReply（包含原本的 \n）来提取 SQL
                 QRegularExpression re("```sql\\s*(.*?)\\s*```", QRegularExpression::DotMatchesEverythingOption);
                 QRegularExpressionMatch match = re.match(aiReply);
 
