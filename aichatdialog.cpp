@@ -424,3 +424,4 @@ void AiChatDialog::executeSqlAndShowResult(const QString &sql)
         ui->textBrowserChat->append("<div style='margin:5px;'>" + html + "</div>");
     }
 }
+
